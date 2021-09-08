@@ -1,7 +1,9 @@
 const { BetContract, Erc20 } = require("@wallfair.io/smart_contract_mock");
-const User = require("../models/User");
-const Bet = require("../models/Bet");
-const Event = require("../models/Event");
+
+// Import User, Bet and Event models
+const { User, Bet, Event, CategoryBetTemplate } = require("@wallfair.io/wallfair-commons").models;
+
+const generateSlug = require("../util/generateSlug");
 
 const WFAIR = new Erc20('WFAIR');
 
@@ -31,6 +33,16 @@ let adminBro = null;
 
 exports.initialize = function () {
     adminBro = new AdminBro({
+        env: {
+            CLIENT_URL: process.env.CLIENT_URL
+        },
+        locale: {
+            translations: {
+                properties: {
+                    slug: 'SEO-optimized name'
+                }
+            }
+        },
         databases: [mongoose],
         resources: [
             {
@@ -80,23 +92,46 @@ exports.initialize = function () {
             {
                 resource: Bet,
                 options: {
+                    properties: {
+                        slug: {
+                            components: {
+                                new: AdminBro.bundle('./components/slug-input'),
+                                edit: AdminBro.bundle('./components/slug-input'),
+                            },
+                            props: {
+                                referenceField: "marketQuestion",
+                                basePath: "/trade/<event-name>/"
+                            }
+                        }
+                    },
                     actions: {
                         new: {
-                            after: async (request) => {
+                            after: async (request, response, context) => {
                                 const bet = flatten.unflatten(request.record.params, {
                                     safe: true,
                                 });
 
                                 const session = await Event.startSession();
-                                await session.withTransaction(async () => {
-                                    bet.id = bet._id;
-                                    await eventService.provideLiquidityToBet(bet);
-                                    const event = await Event.findById(bet.event).session(
-                                        session
-                                    );
-                                    event.bets.push(bet.id);
-                                    await event.save({ session });
-                                });
+                                try {
+                                    await session.withTransaction(async () => {
+                                        bet.id = bet._id;
+                                        await eventService.provideLiquidityToBet(bet);
+                                        const event = await Event.findById(bet.event).session(
+                                            session
+                                        );
+                                        event.bets.push(bet.id);
+                                        await event.save({ session });
+                                    });
+                                } catch (err) {
+                                    console.error(err);
+                                    return {
+                                        record: context.record.toJSON(),
+                                    };
+                                    
+                                } finally {
+                                    await session.endSession();
+                                }
+
                                 return request;
                             },
                         },
@@ -263,8 +298,20 @@ exports.initialize = function () {
                 resource: Event,
                 options: {
                     listProperties: ["_id", "name", "type", "category"],
-                    editProperties: ["name", "type", "category", "previewImageUrl", "streamUrl", "tags"],
-                    showProperties: ["name", "type", "category", "tags", "previewImageUrl", "streamUrl", "metadata"],
+                    editProperties: ["name", "slug", "type", "category", "previewImageUrl", "streamUrl", "tags"],
+                    showProperties: ["name", "slug", "type", "category", "tags", "previewImageUrl", "streamUrl", "metadata"],
+                    properties: {
+                        slug: {
+                            components: {
+                                new: AdminBro.bundle('./components/slug-input'),
+                                edit: AdminBro.bundle('./components/slug-input'),
+                            },
+                            props: {
+                                referenceField: "name",
+                                basePath: "/trade/"
+                            }
+                        }
+                    },
                     actions: {
                         "import-event-from-twitch": {
                             actionType: "resource",
@@ -312,67 +359,15 @@ exports.initialize = function () {
                                 }
                             }
                         },
-                        "new-bet-from-template": {
-                            actionType: "record",
-                            icon: "Plus",
-                            isVisible: true,
-                            handler: async (request, response, context) => {
-                                const record = context.record;
-                                return {
-                                    record: record.toJSON(),
-                                };
-                            },
-                            component: AdminBro.bundle("./components/new-bet"),
-                        },
-                        "do-new-bet-from-template": {
-                            actionType: "record",
-                            isVisible: false,
-                            handler: async (request, response, context) => {
-                                const record = context.record;
-                                const event = flatten.unflatten(record.params, {
-                                    safe: true,
-                                });
-                                let dbEvent = await eventService.getEvent(record.params._id);
-                                const bet = event.betTemplate;
-                                let createBet = new Bet({
-                                    marketQuestion: bet.marketQuestion,
-                                    description: bet.description,
-                                    hot: bet.hot,
-                                    outcomes: bet.outcomes,
-                                    duration: bet.duration,
-                                    event: record.params._id,
-                                    creator: bet.creator,
-                                    published: false,
-                                });
-
-                                const session = await Bet.startSession();
-                                try {
-                                    await session.withTransaction(async () => {
-                                        createBet = await eventService.saveBet(createBet, session);
-
-                                        createBet.endDate = new Date(
-                                            createBet.date.getTime() + bet.betDuration * 1000 * 60
-                                        );
-
-                                        createBet = await eventService.saveBet(createBet, session);
-
-                                        dbEvent.bets.push(createBet);
-                                        dbEvent = await eventService.saveEvent(dbEvent, session);
-                                    });
-                                } finally {
-                                    await session.endSession();
-                                }
-                                record.params = dbEvent;
-                                record.params._doc.createdBet = createBet.id;
-                                return {
-                                    record: record.toJSON(),
-                                };
-                            },
-                            component: AdminBro.bundle("./components/new-bet"),
-                        },
                     },
                 },
             },
+            {
+                resource: CategoryBetTemplate,
+                options: {
+                    listProperties: ["_id", "marketQuestion", "category"],
+                }
+            }
         ],
         rootPath: "/admin",
         branding: {
@@ -392,15 +387,23 @@ exports.getLoginPath = function () {
 };
 let router = null;
 exports.buildRouter = function () {
-    router = AdminBroExpress.buildAuthenticatedRouter(adminBro, {
-        authenticate: async (username, password, request, response) => {
-            return username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD;
-          },
-      cookiePassword: "ueudeiuhihd",
-    });/**/
+    if (process.env.ENVIRONMENT === 'STAGING' || process.env.ENVIRONMENT === 'PRODUCTIVE') {
+        router = Router()
+        router.use(passport.authenticate('jwt_admin', { session: false }))
+    } else {
+        router = AdminBroExpress.buildAuthenticatedRouter(adminBro, {
+            authenticate: async (username, password, request, response) => {
+                return username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD;
+              },
+          cookiePassword: "ueudeiuhihd",
+        }, 
+        null, 
+        {
+            resave: false,
+            saveUninitialized: true,
+        });/**/
+    }
 
-    //router = Router()
-    //router.use(passport.authenticate('jwt_admin', { session: false }))
     router = AdminBroExpress.buildRouter(adminBro, router)
 };
 
