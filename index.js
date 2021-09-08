@@ -119,6 +119,7 @@ server.get('/', (req, res) => {
 // Import Routes
 const userRoute = require('./routes/users/users-routes');
 const secureEventRoutes = require('./routes/users/secure-events-routes');
+const secureRewardsRoutes = require('./routes/users/secure-rewards-routes');
 const eventRoutes = require('./routes/users/events-routes');
 const secureUserRoute = require('./routes/users/secure-users-routes');
 const twitchWebhook = require('./routes/webhooks/twitch-webhook');
@@ -131,6 +132,9 @@ server.use('/api/event', passport.authenticate('jwt', { session: false }), secur
 
 server.use('/api/user', userRoute);
 server.use('/api/user', passport.authenticate('jwt', { session: false }), secureUserRoute);
+
+server.use('/api/rewards', secureRewardsRoutes);
+server.use('/api/rewards', passport.authenticate('jwt', { session: false }), secureRewardsRoutes);
 
 server.use('/webhooks/twitch/', twitchWebhook);
 
